@@ -1,0 +1,87 @@
+name: GitHub Crawler
+
+on:
+  workflow_dispatch:
+    inputs:
+      total_repositories:
+        description: The number of repositories to crawl
+        required: true
+        type: number
+        default: 100000
+      seed_queries:
+        description: The seed queries to start crawling from (separated by commas)
+        required: true
+        type: string
+        default: "language:javascript,language:python,language:go,language:java,language:rust,language:php,language:csharp,language:c++,language:typescript"
+      log_level:
+        description: The log level for the crawler
+        required: true
+        type: choice
+        options:
+          - warn
+          - info
+          - debug
+        default: warn
+
+jobs:
+  crawler-job:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Prepare variables
+        id: prepare-variables
+        shell: bash
+        run: |
+          echo "database_connection_string=postgresql://postgres:postgres@localhost:5432/postgres" >> $GITHUB_OUTPUT
+
+      - name: Run PostgreSQL database migration
+        id: setup-postgres
+        shell: bash
+        run: |
+          psql ${{ steps.prepare-variables.outputs.database_connection_string }} -a -f migration/migration.sql
+
+      - name: Compile crawler
+        shell: bash
+        run: |
+          cargo build --release
+
+      - name: Run crawler
+        id: crawl-stars
+        shell: bash
+        env:
+          GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUST_LOG: ${{ inputs.log_level }}
+        run: |
+          ./target/release/github-crawler \
+            --total-repositories ${{ inputs.total_repositories }} \
+            --seed-queries ${{ inputs.seed_queries }} \
+            --postgres-connection-string ${{ steps.prepare-variables.outputs.database_connection_string }}
+
+      - name: Export repositories from PostgreSQL database in CSV format
+        shell: bash
+        run: |
+          psql ${{ steps.prepare-variables.outputs.database_connection_string }} -c "\copy (SELECT repository_name, organization_name, total_stars FROM github.repository LIMIT ${{ inputs.total_repositories }}) to repository.csv with csv header;"
+
+      - name: Upload repositories CSV file
+        uses: actions/upload-artifact@v4
+        with:
+          name: github-crawler-repositories
+          path: |
+            ./repository.csv
+          if-no-files-found: error
