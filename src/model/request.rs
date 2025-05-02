@@ -3,10 +3,11 @@ use std::{cmp::Ordering, fmt::Display};
 use serde::Serialize;
 
 /// A request to the GitHub API
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, PartialEq, Eq, Clone, Hash)]
 pub enum Request {
     /// A request to fetch organizations from the GitHub API.
     SearchOrganization(SearchOrganizationRequest),
+
     /// A request to fetch repository metadata from the GitHub API for a specific organization.
     RepositoriesFromOrganization(RepositoriesFromOrganizationRequest),
 }
@@ -73,7 +74,7 @@ impl Display for Request {
 }
 
 /// A search request being made to the GitHub API
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, PartialEq, Eq, Clone, Hash)]
 pub struct SearchOrganizationRequest {
     /// The text query.
     pub(crate) query: String,
@@ -117,7 +118,7 @@ impl Display for SearchOrganizationRequest {
 }
 
 /// A repository from organization request being made to the GitHub API
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, PartialEq, Eq, Clone, Hash)]
 pub struct RepositoriesFromOrganizationRequest {
     /// The organization name.
     pub(crate) organization_name: String,
