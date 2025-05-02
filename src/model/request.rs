@@ -36,7 +36,7 @@ impl Request {
     /// Creates a dummy `SearchOrganization` request for testing purposes.
     #[cfg(test)]
     pub(crate) fn dummy_search_organization() -> Self {
-        Self::SearchOrganization(SearchOrganizationRequest::new("is:public", 100, None))
+        Self::SearchOrganization(SearchOrganizationRequest::dummy())
     }
 }
 
@@ -92,6 +92,16 @@ impl SearchOrganizationRequest {
             query: query.to_string(),
             first,
             after,
+        }
+    }
+
+    /// Creates a dummy `SearchOrganizationRequest` for testing purposes.
+    #[cfg(test)]
+    pub(crate) fn dummy() -> Self {
+        Self {
+            query: "dummy".to_string(),
+            first: 10,
+            after: None,
         }
     }
 }

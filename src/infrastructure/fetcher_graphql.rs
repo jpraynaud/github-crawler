@@ -244,3 +244,139 @@ impl RepositoryFetcher for GraphQlFetcher {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+
+    use httpmock::MockServer;
+    use serde_json::json;
+
+    use super::*;
+
+    fn setup_mock_server() -> MockServer {
+        let server = MockServer::start();
+        unsafe {
+            env::set_var("GITHUB_API_TOKEN", "credentials");
+        }
+        server
+    }
+
+    fn mock_json_value() -> serde_json::Value {
+        json!({
+            "data": {
+                "search": {
+                    "edges": [
+                        {
+                            "node": {
+                                "name": "repository-1",
+                                "owner": {
+                                    "login": "org-1"
+                                },
+                                "stargazerCount": 100
+                            }
+                        },
+                        {
+                            "node": {
+                                "name": "repository-2",
+                                "owner": {
+                                    "login": "org-1"
+                                },
+                                "stargazerCount": 200
+                            }
+                        }
+                    ],
+                    "pageInfo": {
+                        "endCursor": Some("cursor123".to_string()),
+                        "hasNextPage": true
+                    }
+                },
+                "rateLimit": {
+                    "limit": 5000,
+                    "cost": 1,
+                    "remaining": 4999,
+                    "resetAt": "2025-01-01T00:00:00Z"
+                }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn test_fetch_organizations() {
+        let server = setup_mock_server();
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/");
+            then.status(200)
+                .header("Content-Type", "application/json")
+                .json_body(mock_json_value());
+        });
+        let fetcher = GraphQlFetcher::try_new(&server.url("/")).unwrap();
+        let request = SearchOrganizationRequest::new("stars:>100", 10, None);
+
+        let (response, next_requests) = fetcher
+            .fetch_organizations(&request)
+            .await
+            .unwrap()
+            .unwrap();
+
+        mock.assert();
+        assert_eq!(Response::new(vec![], FetcherRateLimit::dummy()), response);
+        assert_eq!(
+            vec![
+                Request::RepositoriesFromOrganization(RepositoriesFromOrganizationRequest::new(
+                    "org-1", 10, None,
+                ),),
+                Request::RepositoriesFromOrganization(RepositoriesFromOrganizationRequest::new(
+                    "org-1", 10, None,
+                ),),
+                Request::SearchOrganization(SearchOrganizationRequest::new(
+                    "stars:>100",
+                    10,
+                    Some("cursor123".to_string())
+                ),)
+            ],
+            next_requests
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_repositories_from_organization() {
+        let server = setup_mock_server();
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/");
+            then.status(200)
+                .header("Content-Type", "application/json")
+                .json_body(mock_json_value());
+        });
+        let fetcher = GraphQlFetcher::try_new(&server.url("/")).unwrap();
+        let request = RepositoriesFromOrganizationRequest::new("org-1", 10, None);
+
+        let (response, next_requests) = fetcher
+            .fetch_repositories_from_organization(&request)
+            .await
+            .unwrap()
+            .unwrap();
+
+        mock.assert();
+        assert_eq!(
+            Response::new(
+                vec![
+                    Repository::new("repository-1", "org-1", 100),
+                    Repository::new("repository-2", "org-1", 200)
+                ],
+                FetcherRateLimit::dummy()
+            ),
+            response
+        );
+        assert_eq!(
+            vec![Request::RepositoriesFromOrganization(
+                RepositoriesFromOrganizationRequest::new(
+                    "org-1",
+                    10,
+                    Some("cursor123".to_string()),
+                ),
+            ),],
+            next_requests
+        );
+    }
+}

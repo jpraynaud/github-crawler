@@ -104,7 +104,7 @@ impl Display for Repository {
 }
 
 /// A fetcher API rate limit
-#[derive(Deserialize, Debug, Clone, Default)]
+#[derive(Deserialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct FetcherRateLimit {
     /// The maximum number of requests that can be made in a given time period.
     pub limit: i32,
@@ -124,7 +124,7 @@ impl FetcherRateLimit {
             limit: 5000,
             cost: 1,
             remaining: 4999,
-            reset_at: "2025-10-01T00:00:00Z".to_string(),
+            reset_at: "2025-01-01T00:00:00Z".to_string(),
         }
     }
 }

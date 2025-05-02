@@ -1,7 +1,7 @@
 use super::{FetcherRateLimit, Repository};
 
 /// A response containing a list of public repositories and their metadata.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Response {
     /// Retrieved repositories and their metadata
     pub(crate) repositories: Vec<Repository>,
