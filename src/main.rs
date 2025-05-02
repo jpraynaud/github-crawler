@@ -1,24 +1,29 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use clap::Parser;
 use log::{debug, info};
 
 use github_crawler::{
-    FetcherRetrier, GITHUB_GRAPHQL_ENDPOINT, GraphQlFetcher, PostgresSqlPersister,
-    RepositoryCrawler, Request, SearchOrganizationRequest, SequentialCrawler, StdResult,
+    CrawlerState, FetcherRetrier, GITHUB_GRAPHQL_ENDPOINT, GraphQlFetcher, ParallelCrawler,
+    PersisterRetrier, PostgresSqlPersister, RepositoryCrawler, Request, SearchOrganizationRequest,
+    SequentialCrawler, StdResult,
 };
 
 /// Command line arguments for the GitHub crawler
 #[derive(Parser, Debug)]
 #[command(version)]
 struct Args {
+    /// Total repositories to crawl
+    #[arg(short, long, default_value_t = 100000)]
+    total_repositories: u32,
+
     /// Seed queries used to bootstrap crawling
     #[arg(short, long, value_delimiter = ',', default_value = "is:public")]
     seed_queries: Vec<String>,
 
-    /// Total repositories to crawl
-    #[arg(short, long, default_value_t = 100000)]
-    total_repositories: u32,
+    /// Number of parallel crawlers
+    #[arg(short, long, default_value_t = 1)]
+    number_parallel_crawlers: u8,
 
     /// Maximum number of repositories fetched per request
     #[arg(short, long, default_value_t = 100)]
@@ -29,46 +34,72 @@ struct Args {
     postgres_connection_string: String,
 }
 
+impl Args {
+    async fn build_sequential_crawler(
+        &self,
+        state: Arc<CrawlerState>,
+    ) -> StdResult<Arc<dyn RepositoryCrawler>> {
+        const FETCHER_MAX_RETRIES: u32 = 3;
+        const FETCHER_RETRY_BASE_DELAY: Duration = Duration::from_secs(5);
+        let fetcher = Arc::new(FetcherRetrier::new(
+            Arc::new(GraphQlFetcher::try_new(GITHUB_GRAPHQL_ENDPOINT)?),
+            FETCHER_MAX_RETRIES,
+            FETCHER_RETRY_BASE_DELAY,
+        ));
+        const PERSISTER_MAX_RETRIES: u32 = 3;
+        const PERSISTER_RETRY_BASE_DELAY: Duration = Duration::from_millis(100);
+        let persister = Arc::new(PersisterRetrier::new(
+            Arc::new(PostgresSqlPersister::try_new(&self.postgres_connection_string).await?),
+            PERSISTER_MAX_RETRIES,
+            PERSISTER_RETRY_BASE_DELAY,
+        ));
+
+        Ok(Arc::new(SequentialCrawler::new(fetcher, persister, state)))
+    }
+
+    async fn build_parallel_crawler(
+        &self,
+        state: Arc<CrawlerState>,
+    ) -> StdResult<Arc<dyn RepositoryCrawler>> {
+        const DELAY_BETWEEN_CRAWLERS: Duration = Duration::from_secs(1);
+        let mut crawlers = Vec::new();
+        for _ in 0..self.number_parallel_crawlers {
+            crawlers.push(self.build_sequential_crawler(state.clone()).await?);
+        }
+
+        Ok(Arc::new(ParallelCrawler::new(
+            crawlers,
+            DELAY_BETWEEN_CRAWLERS,
+        )))
+    }
+
+    fn prepare_seed_requests(&self) -> Vec<Request> {
+        self.seed_queries
+            .iter()
+            .map(|query| {
+                Request::SearchOrganization(SearchOrganizationRequest::new(
+                    query,
+                    self.max_repository_fetched_per_request,
+                    None,
+                ))
+            })
+            .collect::<Vec<_>>()
+    }
+}
+
 #[tokio::main]
 async fn main() -> StdResult<()> {
     env_logger::init();
     info!("Starting GitHub crawling");
     let args = Args::parse();
     let total_repositories = args.total_repositories;
-    let max_repository_fetched_per_request = args.max_repository_fetched_per_request;
-    let requests = prepare_seed_requests(&args.seed_queries, max_repository_fetched_per_request);
+    let requests = args.prepare_seed_requests();
     debug!("Seed requests: {requests:?}");
 
-    let crawler = build_sequential_crawler(&args).await?;
+    let state = Arc::new(CrawlerState::default());
+    let crawler = args.build_parallel_crawler(state).await?;
     crawler.crawl(requests, total_repositories).await?;
     info!("Crawling completed");
 
     Ok(())
-}
-
-fn prepare_seed_requests(
-    seed_queries: &[String],
-    max_repository_fetched_per_request: u16,
-) -> Vec<Request> {
-    seed_queries
-        .iter()
-        .map(|query| {
-            Request::SearchOrganization(SearchOrganizationRequest::new(
-                query,
-                max_repository_fetched_per_request,
-                None,
-            ))
-        })
-        .collect::<Vec<_>>()
-}
-
-async fn build_sequential_crawler(args: &Args) -> StdResult<Arc<dyn RepositoryCrawler>> {
-    let postgres_connection_string = &args.postgres_connection_string;
-    let fetcher = Arc::new(FetcherRetrier::new(
-        Arc::new(GraphQlFetcher::try_new(GITHUB_GRAPHQL_ENDPOINT)?),
-        3,
-    ));
-    let persister = Arc::new(PostgresSqlPersister::try_new(postgres_connection_string).await?);
-
-    Ok(Arc::new(SequentialCrawler::new(fetcher, persister)))
 }
