@@ -20,11 +20,12 @@ impl SequentialCrawler {
     pub fn new(
         fetcher: Arc<dyn RepositoryFetcher>,
         persister: Arc<dyn RepositoryPersister>,
+        state: Arc<CrawlerState>,
     ) -> Self {
         Self {
             fetcher,
             persister,
-            state: Arc::new(CrawlerState::default()),
+            state,
         }
     }
 
@@ -65,24 +66,21 @@ impl RepositoryCrawler for SequentialCrawler {
             .set_total_repositories_target(total_repositories)
             .await;
         self.state.push_requests(requests).await;
-        while let Some(request) = self.state.pop_request().await {
-            info!("Processing request: {request}");
-            self.state.increment_total_fetcher_calls(1).await;
-            match self.fetcher.fetch(&request).await? {
-                Some((response, next_requests)) => {
-                    self.process_response(&response, &request).await?;
-                    self.state.push_requests(next_requests).await;
-                    if self.state.get_total_persisted_repositories().await >= total_repositories {
-                        break;
+        while !self.state.has_completed().await? {
+            if let Some(request) = self.state.pop_request().await {
+                info!("Processing request: {request}");
+                self.state.increment_total_fetcher_calls(1).await;
+                match self.fetcher.fetch(&request).await? {
+                    Some((response, next_requests)) => {
+                        self.process_response(&response, &request).await?;
+                        self.state.push_requests(next_requests).await;
                     }
+                    None => {}
                 }
-                None => {}
+                self.state.push_request(request).await;
+                warn!("{}", self.state.state_summary().await);
             }
-            self.state.push_request(request).await;
-
-            warn!("{}", self.state.state_summary().await);
         }
-        self.state.has_completed().await?;
 
         Ok(())
     }
@@ -102,7 +100,11 @@ mod tests {
     async fn crawler_fails_if_not_enough_requests() {
         let fetcher = MockRepositoryFetcher::new();
         let persister = MockRepositoryPersister::new();
-        let crawler = SequentialCrawler::new(Arc::new(fetcher), Arc::new(persister));
+        let crawler = SequentialCrawler::new(
+            Arc::new(fetcher),
+            Arc::new(persister),
+            Arc::new(CrawlerState::default()),
+        );
 
         crawler
             .crawl(vec![], 0)
@@ -139,7 +141,11 @@ mod tests {
             persister
         };
         let requests = vec![Request::dummy_search_organization()];
-        let crawler = SequentialCrawler::new(Arc::new(fetcher), Arc::new(persister));
+        let crawler = SequentialCrawler::new(
+            Arc::new(fetcher),
+            Arc::new(persister),
+            Arc::new(CrawlerState::default()),
+        );
 
         crawler
             .crawl(requests, 10)
@@ -160,7 +166,11 @@ mod tests {
         };
         let persister = MockRepositoryPersister::new();
         let requests = vec![Request::dummy_search_organization()];
-        let crawler = SequentialCrawler::new(Arc::new(fetcher), Arc::new(persister));
+        let crawler = SequentialCrawler::new(
+            Arc::new(fetcher),
+            Arc::new(persister),
+            Arc::new(CrawlerState::default()),
+        );
 
         crawler
             .crawl(requests, 1)
@@ -197,7 +207,11 @@ mod tests {
             persister
         };
         let requests = vec![Request::dummy_search_organization()];
-        let crawler = SequentialCrawler::new(Arc::new(fetcher), Arc::new(persister));
+        let crawler = SequentialCrawler::new(
+            Arc::new(fetcher),
+            Arc::new(persister),
+            Arc::new(CrawlerState::default()),
+        );
 
         crawler
             .crawl(requests, 1)
@@ -272,7 +286,11 @@ mod tests {
         let requests = vec![Request::SearchOrganization(
             crate::SearchOrganizationRequest::new("org-1", 10, None),
         )];
-        let crawler = SequentialCrawler::new(Arc::new(fetcher), Arc::new(persister));
+        let crawler = SequentialCrawler::new(
+            Arc::new(fetcher),
+            Arc::new(persister),
+            Arc::new(CrawlerState::default()),
+        );
 
         crawler.crawl(requests, 3).await.unwrap();
     }
