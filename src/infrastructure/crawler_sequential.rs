@@ -1,57 +1,18 @@
-use std::{
-    collections::{BinaryHeap, HashSet},
-    sync::Arc,
-};
+use std::sync::Arc;
 
 use anyhow::anyhow;
 use log::{info, warn};
-use tokio::sync::Mutex;
 
 use crate::{
-    FetcherRateLimit, RepositoryCrawler, RepositoryFetcher, RepositoryPersister, Request, Response,
+    CrawlerState, RepositoryCrawler, RepositoryFetcher, RepositoryPersister, Request, Response,
     StdResult,
 };
-
-/// A state for the sequential crawler
-#[derive(Debug, Default)]
-pub struct SequentialCrawlerState {
-    requests_priority_queue: BinaryHeap<Request>,
-    requests_pushed: HashSet<Request>,
-    pub(super) total_fetcher_calls: u32,
-    pub(super) api_rate_limit: FetcherRateLimit,
-    pub(super) total_persisted_repositories: u32,
-    pub(super) total_collisions_repositories: u32,
-}
-
-impl SequentialCrawlerState {
-    /// Pushes a request to the priority queue if it hasn't been pushed before.
-    pub fn push_request(&mut self, request: Request) {
-        if self.requests_pushed.contains(&request) {
-            info!("Request already pushed: {request}");
-            return;
-        }
-        self.requests_pushed.insert(request.clone());
-        self.requests_priority_queue.push(request);
-    }
-
-    /// Pushes multiple requests to the priority queue.
-    pub fn push_requests(&mut self, requests: Vec<Request>) {
-        for request in requests {
-            self.push_request(request);
-        }
-    }
-
-    /// Pops a request from the priority queue.
-    pub fn pop_request(&mut self) -> Option<Request> {
-        self.requests_priority_queue.pop()
-    }
-}
 
 /// A sequential crawler
 pub struct SequentialCrawler {
     fetcher: Arc<dyn RepositoryFetcher>,
     persister: Arc<dyn RepositoryPersister>,
-    state: Arc<Mutex<SequentialCrawlerState>>,
+    state: Arc<CrawlerState>,
 }
 
 impl SequentialCrawler {
@@ -63,17 +24,14 @@ impl SequentialCrawler {
         Self {
             fetcher,
             persister,
-            state: Arc::new(Mutex::new(SequentialCrawlerState::default())),
+            state: Arc::new(CrawlerState::default()),
         }
     }
 
-    async fn process_response(
-        &self,
-        response: &Response,
-        request: &Request,
-        state: &mut SequentialCrawlerState,
-    ) -> StdResult<()> {
-        state.api_rate_limit = response.rate_limit().to_owned();
+    async fn process_response(&self, response: &Response, request: &Request) -> StdResult<()> {
+        self.state
+            .update_current_api_rate_limit(response.rate_limit().to_owned())
+            .await;
         let repositories = response.repositories();
         if repositories.is_empty() {
             info!("No repositories found for request: {request:?}");
@@ -82,9 +40,14 @@ impl SequentialCrawler {
             info!("Fetched {repository}");
         }
         let total_persisted_repositories_call = self.persister.persist(repositories).await?;
-        state.total_persisted_repositories += total_persisted_repositories_call;
-        state.total_collisions_repositories +=
-            repositories.len() as u32 - total_persisted_repositories_call;
+        self.state
+            .increment_total_persisted_repositories(total_persisted_repositories_call)
+            .await;
+        self.state
+            .increment_total_collisions_repositories(
+                repositories.len() as u32 - total_persisted_repositories_call,
+            )
+            .await;
 
         Ok(())
     }
@@ -98,41 +61,28 @@ impl RepositoryCrawler for SequentialCrawler {
                 "Not enough requests to process, at least one request is required"
             ));
         }
-
-        let mut state = self.state.lock().await;
-        state.push_requests(requests);
-        while let Some(request) = state.pop_request() {
+        self.state
+            .set_total_repositories_target(total_repositories)
+            .await;
+        self.state.push_requests(requests).await;
+        while let Some(request) = self.state.pop_request().await {
             info!("Processing request: {request}");
-            state.total_fetcher_calls += 1;
+            self.state.increment_total_fetcher_calls(1).await;
             match self.fetcher.fetch(&request).await? {
                 Some((response, next_requests)) => {
-                    self.process_response(&response, &request, &mut state)
-                        .await?;
-                    state.push_requests(next_requests);
-                    if state.total_persisted_repositories >= total_repositories {
+                    self.process_response(&response, &request).await?;
+                    self.state.push_requests(next_requests).await;
+                    if self.state.get_total_persisted_repositories().await >= total_repositories {
                         break;
                     }
                 }
                 None => {}
             }
-            state.push_request(request);
+            self.state.push_request(request).await;
 
-            warn!(
-                "Persisted repositories: done={}/{total_repositories}, collisions={}, Requests: done={}, buffered={}, {}",
-                state.total_persisted_repositories,
-                state.total_collisions_repositories,
-                state.total_fetcher_calls,
-                state.requests_priority_queue.len(),
-                state.api_rate_limit
-            );
+            warn!("{}", self.state.state_summary().await);
         }
-
-        if state.total_persisted_repositories < total_repositories {
-            return Err(anyhow::anyhow!(
-                "Not enough repositories crawled. Expected: {total_repositories}, crawled: {}",
-                state.total_persisted_repositories
-            ));
-        }
+        self.state.has_completed().await?;
 
         Ok(())
     }
