@@ -2,15 +2,28 @@ use std::{collections::BinaryHeap, sync::Arc};
 
 use anyhow::anyhow;
 use log::{debug, info, warn};
+use tokio::sync::Mutex;
 
 use crate::{
-    FetcherRateLimit, RepositoryCrawler, RepositoryFetcher, RepositoryPersister, Request, StdResult,
+    FetcherRateLimit, RepositoryCrawler, RepositoryFetcher, RepositoryPersister, Request, Response,
+    StdResult,
 };
+
+/// A state for the sequential crawler
+#[derive(Debug, Default)]
+pub struct SequentialCrawlerState {
+    pub(super) requests_priority_queue: BinaryHeap<Request>,
+    pub(super) total_fetcher_calls: u32,
+    pub(super) api_rate_limit: FetcherRateLimit,
+    pub(super) total_persisted_repositories: u32,
+    pub(super) total_collisions_repositories: u32,
+}
 
 /// A sequential crawler
 pub struct SequentialCrawler {
     fetcher: Arc<dyn RepositoryFetcher>,
     persister: Arc<dyn RepositoryPersister>,
+    state: Arc<Mutex<SequentialCrawlerState>>,
 }
 
 impl SequentialCrawler {
@@ -19,7 +32,33 @@ impl SequentialCrawler {
         fetcher: Arc<dyn RepositoryFetcher>,
         persister: Arc<dyn RepositoryPersister>,
     ) -> Self {
-        Self { fetcher, persister }
+        Self {
+            fetcher,
+            persister,
+            state: Arc::new(Mutex::new(SequentialCrawlerState::default())),
+        }
+    }
+
+    async fn process_response(
+        &self,
+        response: &Response,
+        request: &Request,
+        state: &mut SequentialCrawlerState,
+    ) -> StdResult<()> {
+        state.api_rate_limit = response.rate_limit().to_owned();
+        let repositories = response.repositories();
+        if repositories.is_empty() {
+            debug!("No repositories found for request: {request:?}");
+        }
+        for repository in repositories {
+            info!("Fetched {repository}");
+        }
+        let total_persisted_repositories_call = self.persister.persist(repositories).await?;
+        state.total_persisted_repositories += total_persisted_repositories_call;
+        state.total_collisions_repositories +=
+            repositories.len() as u32 - total_persisted_repositories_call;
+
+        Ok(())
     }
 }
 
@@ -32,35 +71,17 @@ impl RepositoryCrawler for SequentialCrawler {
             ));
         }
 
-        let mut priority_queue = BinaryHeap::from(requests);
-        let mut total_fetcher_calls = 0;
-        let mut api_rate_limit: FetcherRateLimit = FetcherRateLimit::default();
-        let mut total_persisted_repositories = 0;
-        let mut total_collisions_repositories = 0;
-
-        while let Some(request) = priority_queue.pop() {
+        let mut state = self.state.lock().await;
+        state.requests_priority_queue.extend(requests);
+        while let Some(request) = state.requests_priority_queue.pop() {
             info!("Processing request: {request}");
-            total_fetcher_calls += 1;
+            state.total_fetcher_calls += 1;
             match self.fetcher.fetch(&request).await? {
                 Some((response, next_requests)) => {
-                    api_rate_limit = response.rate_limit().to_owned();
-                    let repositories = response.repositories();
-                    if repositories.is_empty() {
-                        debug!("No repositories found for request: {request:?}");
-                    }
-                    for repository in repositories {
-                        info!("Fetched {repository}");
-                    }
-                    for next_request in next_requests {
-                        priority_queue.push(next_request);
-                    }
-                    let total_persisted_repositories_call =
-                        self.persister.persist(repositories).await?;
-
-                    total_persisted_repositories += total_persisted_repositories_call;
-                    total_collisions_repositories +=
-                        repositories.len() as u32 - total_persisted_repositories_call;
-                    if total_persisted_repositories >= total_repositories {
+                    self.process_response(&response, &request, &mut state)
+                        .await?;
+                    state.requests_priority_queue.extend(next_requests);
+                    if state.total_persisted_repositories >= total_repositories {
                         break;
                     }
                 }
@@ -68,14 +89,19 @@ impl RepositoryCrawler for SequentialCrawler {
             }
 
             warn!(
-                "Persisted repositories: done={total_persisted_repositories}/{total_repositories}, coll={total_collisions_repositories}, Requests: done={total_fetcher_calls}, buff={}, {api_rate_limit}",
-                priority_queue.len()
+                "Persisted repositories: done={}/{total_repositories}, coll={}, Requests: done={}, buff={}, {}",
+                state.total_persisted_repositories,
+                state.total_collisions_repositories,
+                state.total_fetcher_calls,
+                state.requests_priority_queue.len(),
+                state.api_rate_limit
             );
         }
 
-        if total_persisted_repositories < total_repositories {
+        if state.total_persisted_repositories < total_repositories {
             return Err(anyhow::anyhow!(
-                "Not enough repositories crawled. Expected: {total_repositories}, crawled: {total_persisted_repositories}"
+                "Not enough repositories crawled. Expected: {total_repositories}, crawled: {}",
+                state.total_persisted_repositories
             ));
         }
 
