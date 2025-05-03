@@ -2,8 +2,10 @@ use std::{
     collections::{BinaryHeap, HashSet},
     fmt::Display,
     ops::Deref,
+    time::Duration,
 };
 
+use chrono::{DateTime, Utc};
 use log::info;
 use serde::Deserialize;
 use tokio::sync::RwLock;
@@ -271,20 +273,38 @@ impl CrawlerState {
     }
 }
 
+const FETCHER_RATE_LIMIT_MIN_REMAINING_ALLOWED: i32 = 10;
+
 /// A fetcher API rate limit
 #[derive(Deserialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct FetcherRateLimit {
     /// The maximum number of requests that can be made in a given time period.
     pub limit: i32,
+
     /// The cost of the current request.
     pub cost: i32,
+
     /// The remaining number of requests that can be made in the current time period.
     pub remaining: i32,
+
     /// The time at which the rate limit will reset.
     pub reset_at: String,
 }
 
 impl FetcherRateLimit {
+    /// Is the rate limit exceeded
+    pub fn is_exceeded(&self) -> bool {
+        self.remaining <= FETCHER_RATE_LIMIT_MIN_REMAINING_ALLOWED
+    }
+
+    pub fn duration_until_reset(&self, now: DateTime<Utc>) -> StdResult<Duration> {
+        let reset_at = DateTime::parse_from_rfc3339(&self.reset_at)?.with_timezone(&Utc);
+
+        Ok(Duration::from_secs(
+            (1 + (reset_at - now).num_seconds()).max(0).try_into()?,
+        ))
+    }
+
     #[cfg(test)]
     /// Creates a dummy `FetcherRateLimit` instance for testing purposes.
     pub fn dummy() -> Self {
@@ -463,6 +483,80 @@ mod tests {
             let current_rate_limit = state.get_current_api_rate_limit().await;
 
             assert_eq!(current_rate_limit, rate_limit);
+        }
+    }
+
+    mod fetcher_rate_limit {
+        use super::*;
+
+        use chrono::{Duration as ChronoDuration, Utc};
+
+        #[test]
+        fn is_exceeded_when_remaining_is_zero() {
+            let rate_limit = FetcherRateLimit {
+                limit: 5000,
+                cost: 1,
+                remaining: 0,
+                reset_at: "2025-01-01T00:00:00Z".to_string(),
+            };
+
+            assert!(rate_limit.is_exceeded());
+        }
+
+        #[test]
+        fn is_not_exceeded_when_remaining_is_positive() {
+            let rate_limit = FetcherRateLimit {
+                limit: 5000,
+                cost: 1,
+                remaining: 1000,
+                reset_at: "2025-01-01T00:00:00Z".to_string(),
+            };
+
+            assert!(!rate_limit.is_exceeded());
+        }
+
+        #[test]
+        fn duration_until_reset_in_future() {
+            let now = Utc::now();
+            let reset_at = (now + ChronoDuration::seconds(3600)).to_rfc3339();
+            let rate_limit = FetcherRateLimit {
+                limit: 5000,
+                cost: 1,
+                remaining: 1000,
+                reset_at,
+            };
+
+            let duration = rate_limit.duration_until_reset(now).unwrap();
+            assert_eq!(duration.as_secs(), 3601);
+        }
+
+        #[test]
+        fn duration_until_reset_in_past() {
+            let now = Utc::now();
+            let reset_at = (now - ChronoDuration::seconds(3600)).to_rfc3339();
+            let rate_limit = FetcherRateLimit {
+                limit: 5000,
+                cost: 1,
+                remaining: 1000,
+                reset_at,
+            };
+
+            let duration = rate_limit.duration_until_reset(now).unwrap();
+            assert_eq!(duration.as_secs(), 0);
+        }
+
+        #[test]
+        fn duration_until_reset_invalid_format() {
+            let rate_limit = FetcherRateLimit {
+                limit: 5000,
+                cost: 1,
+                remaining: 1000,
+                reset_at: "invalid-date".to_string(),
+            };
+
+            rate_limit
+                .duration_until_reset(Utc::now())
+                .expect_err("Should return an error with invalid format");
         }
     }
 }

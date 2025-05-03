@@ -61,7 +61,7 @@ impl Args {
         &self,
         state: Arc<CrawlerState>,
     ) -> StdResult<Arc<dyn RepositoryCrawler>> {
-        const DELAY_BETWEEN_CRAWLERS: Duration = Duration::from_secs(1);
+        const DELAY_BETWEEN_CRAWLERS: Duration = Duration::from_secs(5);
         let mut crawlers = Vec::new();
         for _ in 0..self.number_parallel_crawlers {
             crawlers.push(self.build_sequential_crawler(state.clone()).await?);
