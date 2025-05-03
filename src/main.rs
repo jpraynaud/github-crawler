@@ -1,12 +1,12 @@
 use std::{sync::Arc, time::Duration};
 
 use clap::Parser;
-use log::{debug, info};
+use log::warn;
 
 use github_crawler::{
-    CrawlerState, FetcherRetrier, GITHUB_GRAPHQL_ENDPOINT, GraphQlFetcher, ParallelCrawler,
-    PersisterRetrier, PostgresSqlPersister, RepositoryCrawler, Request, SearchOrganizationRequest,
-    SequentialCrawler, StdResult,
+    CrawlerState, FetcherRateLimitEnforcer, FetcherRetrier, GITHUB_GRAPHQL_ENDPOINT,
+    GraphQlFetcher, ParallelCrawler, PersisterRetrier, PostgresSqlPersister, RepositoryCrawler,
+    Request, SearchOrganizationRequest, SequentialCrawler, StdResult,
 };
 
 /// Command line arguments for the GitHub crawler
@@ -39,13 +39,18 @@ impl Args {
         &self,
         state: Arc<CrawlerState>,
     ) -> StdResult<Arc<dyn RepositoryCrawler>> {
-        const FETCHER_MAX_RETRIES: u32 = 3;
-        const FETCHER_RETRY_BASE_DELAY: Duration = Duration::from_secs(5);
+        // Initialize a fetcher with a rate limit enforcer and a retrier
+        const FETCHER_MAX_RETRIES: u32 = 5;
+        const FETCHER_RETRY_BASE_DELAY: Duration = Duration::from_secs(10);
         let fetcher = Arc::new(FetcherRetrier::new(
-            Arc::new(GraphQlFetcher::try_new(GITHUB_GRAPHQL_ENDPOINT)?),
+            Arc::new(FetcherRateLimitEnforcer::new(Arc::new(
+                GraphQlFetcher::try_new(GITHUB_GRAPHQL_ENDPOINT)?,
+            ))),
             FETCHER_MAX_RETRIES,
             FETCHER_RETRY_BASE_DELAY,
         ));
+
+        // Initialize a persister with a retrier
         const PERSISTER_MAX_RETRIES: u32 = 3;
         const PERSISTER_RETRY_BASE_DELAY: Duration = Duration::from_millis(100);
         let persister = Arc::new(PersisterRetrier::new(
@@ -61,7 +66,7 @@ impl Args {
         &self,
         state: Arc<CrawlerState>,
     ) -> StdResult<Arc<dyn RepositoryCrawler>> {
-        const DELAY_BETWEEN_CRAWLERS: Duration = Duration::from_secs(5);
+        const DELAY_BETWEEN_CRAWLERS: Duration = Duration::from_secs(1);
         let mut crawlers = Vec::new();
         for _ in 0..self.number_parallel_crawlers {
             crawlers.push(self.build_sequential_crawler(state.clone()).await?);
@@ -90,16 +95,16 @@ impl Args {
 #[tokio::main]
 async fn main() -> StdResult<()> {
     env_logger::init();
-    info!("Starting GitHub crawling");
+    warn!("Starting GitHub crawling");
     let args = Args::parse();
     let total_repositories = args.total_repositories;
     let requests = args.prepare_seed_requests();
-    debug!("Seed requests: {requests:?}");
+    warn!("Seed requests: {requests:?}");
 
     let state = Arc::new(CrawlerState::default());
     let crawler = args.build_parallel_crawler(state).await?;
     crawler.crawl(requests, total_repositories).await?;
-    info!("Crawling completed");
+    warn!("Crawling completed");
 
     Ok(())
 }
