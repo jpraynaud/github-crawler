@@ -22,6 +22,11 @@ on:
           - info
           - debug
         default: warn
+      run_tests:
+        description: Whether to run crawler tests or not
+        required: true
+        type: boolean
+        default: false
 
 jobs:
   crawler-job:
@@ -60,6 +65,12 @@ jobs:
         shell: bash
         run: |
           cargo build --release
+
+      - name: Test crawler
+        if: ${{ inputs.run_tests == 'true' }}
+        shell: bash
+        run: |
+          cargo test --release
 
       - name: Run crawler
         id: crawl-stars
