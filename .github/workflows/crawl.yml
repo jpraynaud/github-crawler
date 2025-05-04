@@ -8,8 +8,8 @@ on:
         required: true
         type: number
         default: 100000
-      number_parallel_crawlers:
-        description: The number of parallel crawlers to run
+      number_workers:
+        description: The number of parallel workers to run
         required: true
         type: number
         default: 10
@@ -17,7 +17,7 @@ on:
         description: The seed queries to start crawling from (separated by commas)
         required: true
         type: string
-        default: "language:javascript,language:python,language:go,language:java,language:rust,language:php,language:csharp,language:c++,language:typescript"
+        default: "language:javascript,language:python,language:go,language:java,language:rust,language:php,language:csharp,language:c++,language:typescript,language:ruby,language:swift,language:kotlin,language:c,language:dart,language:scala,language:r,language:perl,language:haskell"
       log_level:
         description: The log level for the crawler
         required: true
@@ -87,7 +87,7 @@ jobs:
           ./target/release/github-crawler \
             --total-repositories ${{ inputs.total_repositories }} \
             --seed-queries ${{ inputs.seed_queries }} \
-            --number-parallel-crawlers ${{ inputs.number_parallel_crawlers }} \
+            --number-workers ${{ inputs.number_workers }} \
             --postgres-connection-string ${{ steps.prepare-variables.outputs.database_connection_string }}
 
       - name: Export repositories from PostgreSQL database in CSV format

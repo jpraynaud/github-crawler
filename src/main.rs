@@ -6,7 +6,7 @@ use log::warn;
 use github_crawler::{
     CrawlerState, FetcherRateLimitEnforcer, FetcherRetrier, GITHUB_GRAPHQL_ENDPOINT,
     GraphQlFetcher, ParallelCrawler, PersisterRetrier, PostgresSqlPersister, RepositoryCrawler,
-    Request, SearchOrganizationRequest, SequentialCrawler, StdResult,
+    Request, SearchOrganizationRequest, StdResult, WorkerCrawler,
 };
 
 /// Command line arguments for the GitHub crawler
@@ -21,9 +21,9 @@ struct Args {
     #[arg(short, long, value_delimiter = ',', default_value = "is:public")]
     seed_queries: Vec<String>,
 
-    /// Number of parallel crawlers
+    /// Number of workers
     #[arg(short, long, default_value_t = 1)]
-    number_parallel_crawlers: u8,
+    number_workers: u8,
 
     /// Maximum number of repositories fetched per request
     #[arg(short, long, default_value_t = 100)]
@@ -59,7 +59,7 @@ impl Args {
             PERSISTER_RETRY_BASE_DELAY,
         ));
 
-        Ok(Arc::new(SequentialCrawler::new(fetcher, persister, state)))
+        Ok(Arc::new(WorkerCrawler::new(fetcher, persister, state)))
     }
 
     async fn build_parallel_crawler(
@@ -68,7 +68,7 @@ impl Args {
     ) -> StdResult<Arc<dyn RepositoryCrawler>> {
         const DELAY_BETWEEN_CRAWLERS: Duration = Duration::from_secs(1);
         let mut crawlers = Vec::new();
-        for _ in 0..self.number_parallel_crawlers {
+        for _ in 0..self.number_workers {
             crawlers.push(self.build_sequential_crawler(state.clone()).await?);
         }
 

@@ -8,15 +8,15 @@ use crate::{
     StdResult,
 };
 
-/// A sequential crawler
-pub struct SequentialCrawler {
+/// A worker crawler
+pub struct WorkerCrawler {
     fetcher: Arc<dyn RepositoryFetcher>,
     persister: Arc<dyn RepositoryPersister>,
     state: Arc<CrawlerState>,
 }
 
-impl SequentialCrawler {
-    /// Creates a new `SequentialCrawler` instance with the given fetcher and persister.
+impl WorkerCrawler {
+    /// Creates a new `WorkerCrawler` instance with the given fetcher and persister.
     pub fn new(
         fetcher: Arc<dyn RepositoryFetcher>,
         persister: Arc<dyn RepositoryPersister>,
@@ -55,7 +55,7 @@ impl SequentialCrawler {
 }
 
 #[async_trait::async_trait]
-impl RepositoryCrawler for SequentialCrawler {
+impl RepositoryCrawler for WorkerCrawler {
     async fn crawl(&self, requests: Vec<Request>, total_repositories: u32) -> StdResult<()> {
         if requests.len() == 0 {
             return Err(anyhow!(
@@ -100,7 +100,7 @@ mod tests {
     async fn crawler_fails_if_not_enough_requests() {
         let fetcher = MockRepositoryFetcher::new();
         let persister = MockRepositoryPersister::new();
-        let crawler = SequentialCrawler::new(
+        let crawler = WorkerCrawler::new(
             Arc::new(fetcher),
             Arc::new(persister),
             Arc::new(CrawlerState::default()),
@@ -141,7 +141,7 @@ mod tests {
             persister
         };
         let requests = vec![Request::dummy_search_organization()];
-        let crawler = SequentialCrawler::new(
+        let crawler = WorkerCrawler::new(
             Arc::new(fetcher),
             Arc::new(persister),
             Arc::new(CrawlerState::default()),
@@ -166,7 +166,7 @@ mod tests {
         };
         let persister = MockRepositoryPersister::new();
         let requests = vec![Request::dummy_search_organization()];
-        let crawler = SequentialCrawler::new(
+        let crawler = WorkerCrawler::new(
             Arc::new(fetcher),
             Arc::new(persister),
             Arc::new(CrawlerState::default()),
@@ -207,7 +207,7 @@ mod tests {
             persister
         };
         let requests = vec![Request::dummy_search_organization()];
-        let crawler = SequentialCrawler::new(
+        let crawler = WorkerCrawler::new(
             Arc::new(fetcher),
             Arc::new(persister),
             Arc::new(CrawlerState::default()),
@@ -286,7 +286,7 @@ mod tests {
         let requests = vec![Request::SearchOrganization(
             crate::SearchOrganizationRequest::new("org-1", 10, None),
         )];
-        let crawler = SequentialCrawler::new(
+        let crawler = WorkerCrawler::new(
             Arc::new(fetcher),
             Arc::new(persister),
             Arc::new(CrawlerState::default()),
