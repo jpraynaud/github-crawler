@@ -3,8 +3,10 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, anyhow};
-use gql_client::Client;
+use gql_client::{Client, GraphQLError};
+use log::error;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::{
     FetcherRateLimit, RepositoriesFromOrganizationRequest, Repository, RepositoryFetcher, Request,
@@ -42,6 +44,27 @@ query ($query: String!, $first: Int!, $after: String) {
 }
 "#;
 
+/// Fetcher error
+#[derive(Error, Debug)]
+pub enum FetcherError {
+    /// Parse error
+    #[error("Parsing error: {0}")]
+    Parse(String),
+    /// Remote error
+    #[error("Remote error: {0}")]
+    Remote(String),
+}
+
+impl Into<FetcherError> for GraphQLError {
+    fn into(self) -> FetcherError {
+        let message = self.message().to_string();
+        match message.contains("Failed to parse response") {
+            true => FetcherError::Parse(message),
+            false => FetcherError::Remote(message),
+        }
+    }
+}
+
 #[derive(Deserialize, Debug)]
 struct SearchQueryData {
     search: SearchResult,
@@ -50,7 +73,7 @@ struct SearchQueryData {
 
 #[derive(Deserialize, Debug)]
 struct SearchResult {
-    edges: Vec<SearchEdge>,
+    edges: Vec<Option<SearchEdge>>,
     pageInfo: PageInfo,
 }
 
@@ -155,7 +178,15 @@ impl GraphQlFetcher {
                 request.into(),
             )
             .await
-            .map_err(|e| anyhow!(e))?;
+            .map_err(|e| e.into());
+        match fetched_data {
+            Err(FetcherError::Parse(e)) => {
+                error!("Failed to parse GraphQL response: {}", e);
+                return Ok(None);
+            }
+            _ => {}
+        }
+        let fetched_data = fetched_data.map_err(|e| anyhow!(e))?;
         if fetched_data.search.edges.is_empty() {
             return Ok(None);
         }
@@ -164,12 +195,14 @@ impl GraphQlFetcher {
             .search
             .edges
             .into_iter()
-            .map(|edge| {
-                Request::RepositoriesFromOrganization(RepositoriesFromOrganizationRequest::new(
-                    &edge.node.owner.login,
-                    request.first,
-                    None,
-                ))
+            .filter_map(|edge| {
+                edge.map(|edge| {
+                    Request::RepositoriesFromOrganization(RepositoriesFromOrganizationRequest::new(
+                        &edge.node.owner.login,
+                        request.first,
+                        None,
+                    ))
+                })
             })
             .collect::<Vec<_>>();
         if fetched_data.search.pageInfo.hasNextPage {
@@ -197,7 +230,8 @@ impl GraphQlFetcher {
                 request.into(),
             )
             .await
-            .map_err(|e| anyhow!(e))?;
+            .map_err(|e| e.into())
+            .map_err(|e: FetcherError| anyhow!(e))?;
         if fetched_data.search.edges.is_empty() {
             return Ok(None);
         }
@@ -208,12 +242,14 @@ impl GraphQlFetcher {
                     .search
                     .edges
                     .into_iter()
-                    .map(|edge| {
-                        Repository::new(
-                            &edge.node.name,
-                            &request.organization_name,
-                            edge.node.stargazerCount,
-                        )
+                    .filter_map(|edge| {
+                        edge.map(|edge| {
+                            Repository::new(
+                                &edge.node.name,
+                                &request.organization_name,
+                                edge.node.stargazerCount,
+                            )
+                        })
                     })
                     .collect(),
                 fetched_data.rateLimit.into(),
@@ -276,6 +312,7 @@ mod tests {
                                 "stargazerCount": 100
                             }
                         },
+                        null,
                         {
                             "node": {
                                 "name": "repository-2",
