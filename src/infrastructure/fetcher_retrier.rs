@@ -4,16 +4,21 @@ use anyhow::anyhow;
 use log::warn;
 use tokio::time::sleep;
 
-use crate::{RepositoryFetcher, Request, Response, StdResult};
+use crate::{CrawlerState, RepositoryFetcher, Request, Response, StdResult};
 
 /// A struct that retries a RepositoryFetcher a specified number of times in case of failure with exponential backoff strategy.
 pub struct FetcherRetrier {
     /// The fetcher to be retried.
     fetcher: Arc<dyn RepositoryFetcher>,
+
     /// The maximum number of retries for a request.
     max_retries: u32,
+
     /// The base delay for exponential backoff.
     base_delay: Duration,
+
+    /// The state of the crawler
+    state: Arc<CrawlerState>,
 }
 
 impl FetcherRetrier {
@@ -22,11 +27,13 @@ impl FetcherRetrier {
         fetcher: Arc<dyn RepositoryFetcher>,
         max_retries: u32,
         base_delay: Duration,
+        state: Arc<CrawlerState>,
     ) -> Self {
         Self {
             fetcher,
             max_retries,
             base_delay,
+            state,
         }
     }
 
@@ -41,7 +48,7 @@ impl RepositoryFetcher for FetcherRetrier {
     async fn fetch(&self, request: &Request) -> StdResult<Option<(Response, Vec<Request>)>> {
         let mut attempts = 0;
 
-        loop {
+        while !self.state.has_completed().await? {
             match self.fetcher.fetch(request).await {
                 Ok(res) => return Ok(res),
                 Err(e) => {
@@ -54,6 +61,8 @@ impl RepositoryFetcher for FetcherRetrier {
                 }
             }
         }
+
+        Ok(None)
     }
 }
 
@@ -67,6 +76,15 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_success_on_first_attempt() {
+        let state = {
+            let state = CrawlerState::default();
+            state.set_total_repositories_target(10).await;
+            state
+                .push_request(Request::dummy_search_organization())
+                .await;
+
+            state
+        };
         let fetcher = {
             let mut fetcher = MockRepositoryFetcher::new();
             fetcher
@@ -84,7 +102,12 @@ mod tests {
 
             fetcher
         };
-        let retrier = FetcherRetrier::new(Arc::new(fetcher), 3, Duration::from_millis(10));
+        let retrier = FetcherRetrier::new(
+            Arc::new(fetcher),
+            3,
+            Duration::from_millis(10),
+            Arc::new(state),
+        );
 
         retrier
             .fetch(&Request::dummy_search_organization())
@@ -94,6 +117,15 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_success_after_retries() {
+        let state = {
+            let state = CrawlerState::default();
+            state.set_total_repositories_target(10).await;
+            state
+                .push_request(Request::dummy_search_organization())
+                .await;
+
+            state
+        };
         let fetcher = {
             let mut fetcher = MockRepositoryFetcher::new();
             fetcher
@@ -115,7 +147,12 @@ mod tests {
 
             fetcher
         };
-        let retrier = FetcherRetrier::new(Arc::new(fetcher), 3, Duration::from_millis(10));
+        let retrier = FetcherRetrier::new(
+            Arc::new(fetcher),
+            3,
+            Duration::from_millis(10),
+            Arc::new(state),
+        );
 
         retrier
             .fetch(&Request::dummy_search_organization())
@@ -125,6 +162,15 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_failure_after_max_retries() {
+        let state = {
+            let state = CrawlerState::default();
+            state.set_total_repositories_target(10).await;
+            state
+                .push_request(Request::dummy_search_organization())
+                .await;
+
+            state
+        };
         let fetcher = {
             let mut fetcher = MockRepositoryFetcher::new();
             fetcher
@@ -134,7 +180,12 @@ mod tests {
 
             fetcher
         };
-        let retrier = FetcherRetrier::new(Arc::new(fetcher), 3, Duration::from_millis(10));
+        let retrier = FetcherRetrier::new(
+            Arc::new(fetcher),
+            3,
+            Duration::from_millis(10),
+            Arc::new(state),
+        );
 
         retrier
             .fetch(&Request::dummy_search_organization())

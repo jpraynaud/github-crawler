@@ -4,7 +4,7 @@ use anyhow::anyhow;
 use log::warn;
 use tokio::time::sleep;
 
-use crate::{RepositoryCrawler, Request, StdResult};
+use crate::{CrawlerState, RepositoryCrawler, Request, StdResult};
 
 /// A parallel crawler that uses multiple crawlers to fetch repositories concurrently.
 pub struct ParallelCrawler {
@@ -13,6 +13,9 @@ pub struct ParallelCrawler {
 
     /// The delay between starting each crawler
     delay_between_crawlers: Duration,
+
+    /// The state of the crawler
+    state: Arc<CrawlerState>,
 }
 
 impl ParallelCrawler {
@@ -20,10 +23,12 @@ impl ParallelCrawler {
     pub fn new(
         crawlers: Vec<Arc<dyn RepositoryCrawler>>,
         delay_between_crawlers: Duration,
+        state: Arc<CrawlerState>,
     ) -> Self {
         Self {
             crawlers,
             delay_between_crawlers,
+            state,
         }
     }
 }
@@ -32,21 +37,23 @@ impl ParallelCrawler {
 impl RepositoryCrawler for ParallelCrawler {
     async fn crawl(&self, requests: Vec<Request>, total_repositories: u32) -> StdResult<()> {
         if requests.is_empty() {
-            return Err(anyhow!("No requests provided"));
+            return Err(anyhow!(
+                "Not enough requests to process, at least one request is required"
+            ));
         }
+
+        self.state.push_requests(requests).await;
+        warn!("{}", self.state.state_summary().await);
 
         let mut handles = Vec::new();
         for crawler in &self.crawlers {
             if !handles.is_empty() {
                 sleep(self.delay_between_crawlers).await;
             }
-            let requests_clone = requests.clone();
+
             let crawler_clone = Arc::clone(crawler);
-            let handle = tokio::spawn(async move {
-                crawler_clone
-                    .crawl(requests_clone, total_repositories)
-                    .await
-            });
+            let handle =
+                tokio::spawn(async move { crawler_clone.crawl(vec![], total_repositories).await });
             handles.push(handle);
             warn!("Started crawler {}/{}", handles.len(), self.crawlers.len());
         }
@@ -69,7 +76,11 @@ mod tests {
 
     #[tokio::test]
     async fn crawl_with_no_requests() {
-        let crawler = ParallelCrawler::new(vec![], Duration::from_secs(0));
+        let crawler = ParallelCrawler::new(
+            vec![],
+            Duration::from_secs(0),
+            Arc::new(CrawlerState::default()),
+        );
 
         crawler
             .crawl(vec![], 10)
@@ -88,7 +99,11 @@ mod tests {
 
             mock_crawler
         };
-        let crawler = ParallelCrawler::new(vec![Arc::new(mock_crawler)], Duration::from_secs(0));
+        let crawler = ParallelCrawler::new(
+            vec![Arc::new(mock_crawler)],
+            Duration::from_secs(0),
+            Arc::new(CrawlerState::default()),
+        );
 
         crawler
             .crawl(vec![Request::dummy_search_organization()], 10)
@@ -119,6 +134,7 @@ mod tests {
         let crawler = ParallelCrawler::new(
             vec![Arc::new(mock_crawler1), Arc::new(mock_crawler2)],
             Duration::from_secs(0),
+            Arc::new(CrawlerState::default()),
         );
 
         crawler
@@ -150,6 +166,7 @@ mod tests {
         let crawler = ParallelCrawler::new(
             vec![Arc::new(mock_crawler1), Arc::new(mock_crawler2)],
             Duration::from_secs(0),
+            Arc::new(CrawlerState::default()),
         );
 
         crawler
@@ -182,6 +199,7 @@ mod tests {
         let crawler = ParallelCrawler::new(
             vec![Arc::new(mock_crawler1), Arc::new(mock_crawler2)],
             Duration::from_secs(1),
+            Arc::new(CrawlerState::default()),
         );
 
         crawler

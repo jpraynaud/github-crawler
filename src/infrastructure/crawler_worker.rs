@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use anyhow::anyhow;
 use log::{info, warn};
 
 use crate::{
@@ -10,8 +9,13 @@ use crate::{
 
 /// A worker crawler
 pub struct WorkerCrawler {
+    /// The fetcher to be used for fetching repositories
     fetcher: Arc<dyn RepositoryFetcher>,
+
+    /// The persister to be used for persisting repositories
     persister: Arc<dyn RepositoryPersister>,
+
+    /// The state of the crawler
     state: Arc<CrawlerState>,
 }
 
@@ -57,11 +61,6 @@ impl WorkerCrawler {
 #[async_trait::async_trait]
 impl RepositoryCrawler for WorkerCrawler {
     async fn crawl(&self, requests: Vec<Request>, total_repositories: u32) -> StdResult<()> {
-        if requests.len() == 0 {
-            return Err(anyhow!(
-                "Not enough requests to process, at least one request is required"
-            ));
-        }
         self.state
             .set_total_repositories_target(total_repositories)
             .await;
@@ -77,10 +76,11 @@ impl RepositoryCrawler for WorkerCrawler {
                     }
                     None => {}
                 }
-                self.state.push_request(request).await;
+                self.state.acknowledge_request(&request).await;
                 warn!("{}", self.state.state_summary().await);
             }
         }
+        warn!("Crawler has completed");
 
         Ok(())
     }
@@ -88,6 +88,7 @@ impl RepositoryCrawler for WorkerCrawler {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::anyhow;
     use mockall::predicate::eq;
 
     use crate::{
@@ -95,22 +96,6 @@ mod tests {
     };
 
     use super::*;
-
-    #[tokio::test]
-    async fn crawler_fails_if_not_enough_requests() {
-        let fetcher = MockRepositoryFetcher::new();
-        let persister = MockRepositoryPersister::new();
-        let crawler = WorkerCrawler::new(
-            Arc::new(fetcher),
-            Arc::new(persister),
-            Arc::new(CrawlerState::default()),
-        );
-
-        crawler
-            .crawl(vec![], 0)
-            .await
-            .expect_err("Crawler should fail if not enough requests");
-    }
 
     #[tokio::test]
     async fn crawler_fails_if_not_enough_repositories_are_persisted() {

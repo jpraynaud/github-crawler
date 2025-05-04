@@ -48,6 +48,7 @@ impl Args {
             ))),
             FETCHER_MAX_RETRIES,
             FETCHER_RETRY_BASE_DELAY,
+            state.clone(),
         ));
 
         // Initialize a persister with a retrier
@@ -75,6 +76,7 @@ impl Args {
         Ok(Arc::new(ParallelCrawler::new(
             crawlers,
             DELAY_BETWEEN_CRAWLERS,
+            state.clone(),
         )))
     }
 

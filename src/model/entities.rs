@@ -123,6 +123,9 @@ pub struct CrawlerState {
     /// A set of requests that have already been pushed to the queue to avoid duplicates
     requests_pushed: RwLock<HashSet<Request>>,
 
+    /// A set of requests that are currently in progress
+    requests_in_progress: RwLock<HashSet<Request>>,
+
     /// The total number of repositories to be fetched
     total_repositories_target: RwLock<u32>,
 
@@ -157,8 +160,13 @@ impl CrawlerState {
                 let requests_pushed = self.requests_pushed.read().await;
                 !(*requests_pushed).is_empty()
             };
+            let has_in_progress_requests = {
+                let requests_in_progress = self.requests_in_progress.read().await;
+                !(*requests_in_progress).is_empty()
+            };
             let has_failed = has_empty_priority_queue
                 && has_pushed_requests
+                && !has_in_progress_requests
                 && !has_persisted_enough_repositories;
             if has_failed {
                 Err(anyhow::anyhow!(
@@ -181,7 +189,7 @@ impl CrawlerState {
             (*requests_pushed).insert(request.clone());
         }
         let mut requests_priority_queue = self.requests_priority_queue.write().await;
-        (*requests_priority_queue).push(request);
+        (*requests_priority_queue).push(request.clone());
     }
 
     /// Pushes multiple requests to the priority queue.
@@ -191,11 +199,22 @@ impl CrawlerState {
         }
     }
 
+    /// Acknowledges a request that has been processed.
+    pub async fn acknowledge_request(&self, request: &Request) {
+        let mut requests_in_progress = self.requests_in_progress.write().await;
+        (*requests_in_progress).remove(request);
+    }
+
     /// Pops a request from the priority queue.
     pub async fn pop_request(&self) -> Option<Request> {
         let mut requests_priority_queue = self.requests_priority_queue.write().await;
+        let popped_request = (*requests_priority_queue).pop();
+        if let Some(ref request) = popped_request {
+            let mut requests_in_progress = self.requests_in_progress.write().await;
+            (*requests_in_progress).insert(request.to_owned());
+        }
 
-        (*requests_priority_queue).pop()
+        popped_request
     }
 
     /// Sets the total number of repositories to be fetched.
@@ -265,10 +284,11 @@ impl CrawlerState {
         let total_collisions_repositories = self.total_collisions_repositories.read().await;
         let current_api_rate_limit = self.current_api_rate_limit.read().await;
         let total_buffered_requests = self.requests_priority_queue.read().await.len();
+        let total_in_progress_requests = self.requests_in_progress.read().await.len();
         let total_repositories_target = self.get_total_repositories_target().await;
 
         format!(
-            "Repositories: done={total_persisted_repositories}/{total_repositories_target}, collisions={total_collisions_repositories}, Requests: done={total_fetcher_calls}, buffered={total_buffered_requests}, {current_api_rate_limit}",
+            "Repositories: done={total_persisted_repositories}/{total_repositories_target}, collisions={total_collisions_repositories}, Requests: done={total_fetcher_calls} in_progress={total_in_progress_requests} buffered={total_buffered_requests}, {current_api_rate_limit}",
         )
     }
 }
@@ -349,15 +369,16 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn has_not_completed_and_fails_when_queue_empty_and_requests_pushed_but_not_enough_repositories_persisted()
+        async fn has_not_completed_and_fails_when_queue_empty_and_requests_pushed_and_requests_acknowledged_but_not_enough_repositories_persisted()
          {
             let state = CrawlerState::default();
             state.set_total_repositories_target(10).await;
             state.increment_total_persisted_repositories(5).await;
             let request = Request::dummy_search_organization();
-            state.push_request(request).await;
+            state.push_request(request.clone()).await;
             let _ = state.pop_request().await.unwrap();
             assert!(state.pop_request().await.is_none());
+            state.acknowledge_request(&request).await;
 
             state.has_completed().await.expect_err("Expected an error");
         }
